@@ -7,6 +7,7 @@
  * Creator: https://github.com/2ni
  * 
  * Edited: 20.11.2024 by Erik Tóth (https://github.com/erik-toth)
+ * Edited: 10.10.2025 by Ryan (https://github.com/ryanhz)
  */
 
 #include "Arduino.h"
@@ -15,7 +16,8 @@
 RTTTL::RTTTL(const byte pin) {
   this->pin = pin;
 
-  ledcAttach(pin, 1000, 10);
+  // Attach LEDC channel automatically (Core 3.x doesn't use channel number)
+  ledcAttachPin(pin, 1000, 10);
 }
 
 void RTTTL::loadSong(const char *song) {
@@ -36,42 +38,37 @@ void RTTTL::loadSong(const char *song, const int volume) {
 
   int num;
 
-  // format: d=N,o=N,b=NNN:
-  while (*buffer != ':') buffer++; // ignore name
-  buffer++; // skip ':'
+  // Skip name
+  while (*buffer != ':' && *buffer != '\0') buffer++;
+  if (*buffer == ':') buffer++;
 
-  // get default duration
+  // default duration
   if (*buffer == 'd') {
-    buffer++; buffer++; // skip "d="
+    buffer += 2; // skip "d="
     num = 0;
-    while (isdigit(*buffer)) {
-      num = (num * 10) + (*buffer++ - '0');
-    }
+    while (isdigit(*buffer)) num = (num * 10) + (*buffer++ - '0');
     if (num > 0) defaultDur = num;
-    buffer++; // skip comma
+    if (*buffer == ',') buffer++;
   }
 
-  // get default octave
+  // default octave
   if (*buffer == 'o') {
-    buffer++; buffer++; // skip "o="
+    buffer += 2; // skip "o="
     num = *buffer++ - '0';
-    if(num >= 3 && num <=7) defaultOct = num;
-    buffer++; // skip comma
+    if (num >= 3 && num <= 7) defaultOct = num;
+    if (*buffer == ',') buffer++;
   }
 
-  // get BPM
-  if(*buffer == 'b') {
-    buffer++; buffer++; // skip "b="
+  // bpm
+  if (*buffer == 'b') {
+    buffer += 2; // skip "b="
     num = 0;
-    while(isdigit(*buffer)) {
-      num = (num * 10) + (*buffer++ - '0');
-    }
+    while (isdigit(*buffer)) num = (num * 10) + (*buffer++ - '0');
     bpm = num;
-    buffer++; // skip colon
+    if (*buffer == ':') buffer++;
   }
 
-  // BPM = number of quarter notes per minute
-  wholenote = (60 * 1000L / bpm) * 2;  // this is the time for whole note (in milliseconds)
+  wholenote = (60 * 1000L / bpm) * 2;
 }
 
 void RTTTL::noTone() {
@@ -79,129 +76,105 @@ void RTTTL::noTone() {
 }
 
 void RTTTL::tone(int frq, int duration) {
+  // Start the tone
   ledcWriteTone(pin, frq);
   ledcWrite(pin, volume);
 
-  delay(duration);
+  // Schedule note end time (no delay!)
+  noteDelay = millis() + duration;
 }
-
 
 void RTTTL::nextNote() {
   long duration;
   byte note;
   byte scale;
 
-  //stop current note
+  // stop previous tone if needed
   noTone();
 
-  // first, get note duration, if available
-  int num = 0;
-  while (isdigit(*buffer)) {
-    num = (num * 10) + (*buffer++ - '0');
+  // end of song
+  if (*buffer == '\0') {
+    stop();
+    return;
   }
 
+  // duration
+  int num = 0;
+  while (isdigit(*buffer)) num = (num * 10) + (*buffer++ - '0');
   if (num) duration = wholenote / num;
-  else duration = wholenote / defaultDur;  // we will need to check if we are a dotted note after
+  else duration = wholenote / defaultDur;
 
-  // now get the note
+  // note letter
   note = 0;
-
-  switch(*buffer) {
-    case 'c':
-      note = 1;
-      break;
-    case 'd':
-      note = 3;
-      break;
-    case 'e':
-      note = 5;
-      break;
-    case 'f':
-      note = 6;
-      break;
-    case 'g':
-      note = 8;
-      break;
-    case 'a':
-      note = 10;
-      break;
-    case 'b':
-      note = 12;
-      break;
+  switch (*buffer) {
+    case 'c': note = 1; break;
+    case 'd': note = 3; break;
+    case 'e': note = 5; break;
+    case 'f': note = 6; break;
+    case 'g': note = 8; break;
+    case 'a': note = 10; break;
+    case 'b': note = 12; break;
     case 'p':
-    default:
-      note = 0;
+    default: note = 0;
   }
   buffer++;
 
-  // now, get optional '#' sharp
+  // sharp
   if (*buffer == '#') {
     note++;
     buffer++;
   }
 
-  // now, get optional '.' dotted note
+  // dotted note
   if (*buffer == '.') {
-    duration += duration/2;
+    duration += duration / 2;
     buffer++;
   }
 
-  // now, get scale
+  // scale
   if (isdigit(*buffer)) {
     scale = *buffer - '0';
     buffer++;
   } else {
     scale = defaultOct;
   }
-
   scale += OCTAVE_OFFSET;
 
-  if (*buffer == ',')
-    buffer++; // skip comma for next note (or we may be at the end)
+  if (*buffer == ',') buffer++;
 
-  if (note) {
-    tone(notes[(scale - 4) * 12 + note], duration);
-
-    noteDelay = millis() + (duration+1);
-  } else {
-    noteDelay = millis() + (duration);
+  // rest note
+  if (note == 0) {
+    noTone();
+    noteDelay = millis() + duration;
+    return;
   }
+
+  // play tone asynchronously
+  int freq = notes[(scale - 4) * 12 + note];
+  tone(freq, duration);
 }
 
 void RTTTL::play() {
-  // if done playing the song, return
-  if (!playing) {
-    return;
-  }
+  if (!playing) return;
 
-  // are we still playing a note ?
-  unsigned long m = millis();
-  if (m < noteDelay) {
-    // wait until the note is completed
-    return;
-  }
+  unsigned long now = millis();
 
-  //ready to play the next note
+  // If still within note duration, just continue
+  if (now < noteDelay) return;
+
+  // If reached end of buffer, stop
   if (*buffer == '\0') {
-    // no more notes. Reached the end of the last note
-
     stop();
-    return; //end of the song
-  } else {
-    // more notes to play...
-    nextNote();
+    return;
   }
+
+  // Otherwise, advance to next note
+  nextNote();
 }
 
 void RTTTL::stop() {
   if (playing) {
-    // increase song buffer until the end
-    while (*buffer != '\0') {
-      buffer++;
-    }
-
     noTone();
-
     playing = false;
   }
 }
@@ -213,3 +186,4 @@ bool RTTTL::done() {
 bool RTTTL::isPlaying() {
   return playing;
 }
+
