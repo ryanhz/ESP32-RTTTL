@@ -17,7 +17,7 @@ RTTTL::RTTTL(const byte pin) {
   this->pin = pin;
 
   // Attach LEDC channel automatically (Core 3.x doesn't use channel number)
-  ledcAttachPin(pin, 1000, 10);
+  ledcAttach(pin, 1000, 10);
 }
 
 void RTTTL::loadSong(const char *song) {
